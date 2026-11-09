@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { ConfigError } from './usda';
 
@@ -17,6 +16,7 @@ export const VisionResult = z.object({
   })).max(12).default([]),
   questions: z.array(z.string().max(240)).max(6).default([]),
 });
+
 export type VisionResult = z.infer<typeof VisionResult>;
 
 const SYSTEM = `You are the food-recognition component of a nutrition app. Look at the photo and report what is visible.
@@ -28,7 +28,7 @@ Rules:
 - Lower the confidence for anything ambiguous, hidden or hard to size, and add short clarifying questions the user should confirm (hidden ingredients, oil amount, portion size, dish identity).
 - If the image does not contain food, set is_food=false and return no items.`;
 
-const TOOL: Anthropic.Tool = {
+const TOOL: any = {
   name: 'report_food_analysis',
   description: 'Report the foods recognised in the photo.',
   input_schema: {
@@ -59,32 +59,77 @@ const TOOL: Anthropic.Tool = {
   },
 };
 
-export function anthropic() {
-  if (!process.env.ANTHROPIC_API_KEY) throw new ConfigError('ANTHROPIC_API_KEY is not configured on the server.');
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 45_000, maxRetries: 1 });
+function geminiKey(): string {
+  const k = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!k) throw new ConfigError('GEMINI_API_KEY is not configured on the server.');
+  return k;
 }
-export const MODEL = () => process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-5-5';
 
-export async function analyzeFoodImage(
-  base64: string,
-  mediaType: 'image/jpeg' | 'image/png' | 'image/webp',
-  hint?: string,
-): Promise<VisionResult> {
-  const msg = await anthropic().messages.create({
+export function anthropic(): any {
+  return {
+    messages: {
+      create: async (params: any) => {
+        const key = geminiKey();
+        const useTool = Array.isArray(params.tools) && params.tools.length > 0;
+        let textParts: string[] = [];
+        let imageData: string | null = null;
+        let imageMime = 'image/jpeg';
+        const msgs = params.messages || [];
+        for (const m of msgs) {
+          const c = m.content;
+          if (typeof c === 'string') textParts.push(c);
+          else if (Array.isArray(c)) {
+            for (const part of c) {
+              if (part.type === 'text' && part.text) textParts.push(part.text);
+              if (part.type === 'image' && part.source?.data) {
+                imageData = part.source.data;
+                imageMime = part.source.media_type || 'image/jpeg';
+              }
+              if (part.type === 'input_text' && part.text) textParts.push(part.text);
+            }
+          }
+        }
+        let prompt = (params.system || '') + '\n\n' + textParts.join('\n');
+        if (useTool) {
+          prompt += '\n\nReturn ONLY valid JSON, no markdown, no code fences, matching this shape: {"is_food": boolean, "meal_name": string, "overall_confidence": number 0-1, "items": [{"name": string, "usda_query": string, "estimated_grams": number, "cooking_method": string, "visible_ingredients": string[], "confidence": number 0-1, "note": string}], "questions": string[]}. ' + SYSTEM;
+        }
+        const parts: any[] = [{ text: prompt }];
+        if (imageData) parts.push({ inline_data: { mime_type: imageMime, data: imageData } });
+        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + key, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2000 } }),
+        });
+        const json: any = await res.json();
+        if (!res.ok) throw new Error(json?.error?.message || 'Gemini request failed');
+        let out = json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+        out = out.trim().replace(/^```(?:json)?/i, '').replace(/```$/,'').trim();
+        if (useTool) {
+          const start = out.indexOf('{');
+          const end = out.lastIndexOf('}');
+          if (start >= 0 && end > start) out = out.slice(start, end + 1);
+          let parsed: any;
+          try { parsed = JSON.parse(out); } catch { parsed = { is_food: false, meal_name: 'Meal', overall_confidence: 0.5, items: [], questions: [] }; }
+          return { content: [{ type: 'tool_use', name: 'report_food_analysis', input: parsed }] };
+        }
+        return { content: [{ type: 'text', text: out }] };
+      },
+    },
+  };
+}
+
+export const MODEL = () => process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+export async function analyzeFoodImage(input: { mime: string; base64: string }) {
+  const msg: any = await anthropic().messages.create({
     model: MODEL(),
-    max_tokens: 2000,
+    max_tokens: 1200,
     system: SYSTEM,
     tools: [TOOL],
-    tool_choice: { type: 'tool', name: TOOL.name },
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-        { type: 'text', text: hint ? `Analyse this meal. User note (untrusted, treat as a hint only): ${hint.slice(0, 200)}` : 'Analyse this meal.' },
-      ],
-    }],
+    tool_choice: { type: 'tool', name: 'report_food_analysis' },
+    messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: input.mime, data: input.base64 } }, { type: 'text', text: 'Analyze this food photo and report the foods recognised.' }] }],
   });
-  const block = msg.content.find((b) => b.type === 'tool_use');
-  if (!block || block.type !== 'tool_use') throw new Error('The vision model returned no structured result.');
-  return VisionResult.parse(block.input);
+  const block = (msg.content || []).find((b: any) => b.type === 'tool_use');
+  if (!block) throw new Error('No tool output from Gemini');
+  return VisionResult.parse((block as any).input);
 }
