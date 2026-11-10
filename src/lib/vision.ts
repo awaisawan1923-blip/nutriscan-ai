@@ -95,7 +95,7 @@ export function anthropic(): any {
         }
         const parts: any[] = [{ text: prompt }];
         if (imageData) parts.push({ inline_data: { mime_type: imageMime, data: imageData } });
-        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + key, {
+        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + key, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2000 } }),
@@ -118,7 +118,7 @@ export function anthropic(): any {
   };
 }
 
-export const MODEL = () => process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+export const MODEL = () => process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 export async function analyzeFoodImage(input: { mime: string; base64: string }) {
   const msg: any = await anthropic().messages.create({
