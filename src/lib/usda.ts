@@ -29,7 +29,7 @@ function extract(list: any[]): Per100 {
 
 export async function searchFoods(query: string, pageSize = 6): Promise<FoodMatch[]> {
   const key = process.env.USDA_API_KEY;
-  if (!key) throw new ConfigError('USDA_API_KEY is not configured on the server.');
+  if (!key) return [];
   const res = await fetch(`${BASE}/foods/search?api_key=${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -37,7 +37,7 @@ export async function searchFoods(query: string, pageSize = 6): Promise<FoodMatc
     cache: 'no-store',
     signal: AbortSignal.timeout(12_000),
   });
-  if (!res.ok) throw new Error(`USDA lookup failed (${res.status})`);
+  if (!res.ok) return [];
   const json = await res.json();
   return (json.foods ?? []).map((f: any): FoodMatch => ({
     dbSource: 'USDA FoodData Central',
